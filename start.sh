@@ -13,9 +13,8 @@ fi
 echo "$SSH_PRIVATE_KEY" | base64 -d > /root/.ssh/id_rsa
 chmod 600 /root/.ssh/id_rsa
 
-# Verificar se a chave foi decodificada corretamente
 if ! grep -q "BEGIN" /root/.ssh/id_rsa; then
-  echo "❌ Chave SSH inválida (base64 decode falhou)"
+  echo "❌ Chave SSH inválida"
   exit 1
 fi
 echo "✅ Chave SSH configurada"
@@ -23,9 +22,6 @@ echo "✅ Chave SSH configurada"
 # 2. Adicionar bastion ao known_hosts via porta 443
 echo "🔍 Escaneando host na porta 443..."
 ssh-keyscan -p 443 -T 15 54.210.207.242 >> /root/.ssh/known_hosts 2>&1
-if [ $? -ne 0 ]; then
-  echo "⚠️  ssh-keyscan falhou, adicionando StrictHostKeyChecking=no como fallback"
-fi
 echo "✅ known_hosts configurado"
 
 # 3. Abrir túnel SSH via porta 443
@@ -58,7 +54,7 @@ while [ $RETRIES -lt $MAX_RETRIES ]; do
 done
 
 if [ $RETRIES -ge $MAX_RETRIES ]; then
-  echo "❌ Túnel não ficou disponível após $MAX_RETRIES tentativas"
+  echo "❌ Túnel não ficou disponível"
   kill $TUNNEL_PID 2>/dev/null
   exit 1
 fi
@@ -70,7 +66,8 @@ export MYSQL_PORT="${MYSQL_PORT:-3307}"
 export MYSQL_USER="${MYSQL_USER:-vinicius}"
 export MYSQL_PASS="${MYSQL_PASS}"
 export MYSQL_DB="${MYSQL_DB:-boobam}"
-export TRANSPORT_TYPE="${TRANSPORT_TYPE:-sse}"
+export TRANSPORT_TYPE="sse"
 export PORT="${PORT:-3000}"
+export HOST="0.0.0.0"
 
-mcp-server-mysql
+exec mcp-server-mysql
