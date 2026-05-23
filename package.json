@@ -1,9 +1,7 @@
 {
   "name": "boobam-mcp-server",
   "version": "1.0.0",
-  "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
     "express": "^4.19.2",
     "mysql2": "^3.9.7"
   }
