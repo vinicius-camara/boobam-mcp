@@ -2,7 +2,6 @@
 
 echo "🔑 Configurando chave SSH..."
 
-# Verifica se SSH_PRIVATE_KEY está definida
 if [ -z "$SSH_PRIVATE_KEY" ]; then
   echo "❌ SSH_PRIVATE_KEY não está definida!"
   exit 1
@@ -10,9 +9,6 @@ fi
 
 echo "🌐 IP externo deste container: $(curl -s --max-time 5 ifconfig.me || echo 'nao obtido')"
 
-echo "📏 Tamanho da chave base64: ${#SSH_PRIVATE_KEY} chars"
-
-# Decodifica a chave
 echo "$SSH_PRIVATE_KEY" | base64 -d > /root/.ssh/id_rsa 2>/tmp/b64err
 B64_EXIT=$?
 if [ $B64_EXIT -ne 0 ]; then
@@ -25,6 +21,16 @@ KEYSIZE=$(wc -c < /root/.ssh/id_rsa)
 echo "✅ Chave decodificada: $KEYSIZE bytes"
 chmod 600 /root/.ssh/id_rsa
 
+echo "🔌 Testando TCP na porta 22 do bastion..."
+nc -zv -w 10 54.210.207.242 22
+NC_EXIT=$?
+if [ $NC_EXIT -ne 0 ]; then
+  echo "❌ PORTA 22 INACESSIVEL (nc exit $NC_EXIT) — bloqueio de rede confirmado"
+  sleep 30
+  exit 1
+fi
+echo "✅ TCP porta 22 OK"
+
 echo "🔍 Adicionando fingerprint do bastion..."
 ssh-keyscan -T 10 -H 54.210.207.242 >> /root/.ssh/known_hosts 2>&1
 echo "   ssh-keyscan exit: $?"
@@ -35,7 +41,7 @@ ssh -v \
     -L 3307:boobam-aurora-qa.cluster-cnoog7catbsl.us-east-1.rds.amazonaws.com:3306 \
     devops@54.210.207.242 \
     -N \
-    -o ConnectTimeout=15 \
+    -o ConnectTimeout=20 \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=5 \
     -o StrictHostKeyChecking=no \
@@ -43,14 +49,25 @@ ssh -v \
     2>&1 &
 
 TUNNEL_PID=$!
-echo "⏳ Aguardando 5s (PID: $TUNNEL_PID)..."
-sleep 5
 
-if ! kill -0 $TUNNEL_PID 2>/dev/null; then
-  echo "❌ Tunnel falhou — verifique logs SSH acima"
+echo "⏳ Aguardando tunnel (porta 3307)..."
+for i in $(seq 1 25); do
+  if nc -z 127.0.0.1 3307 2>/dev/null; then
+    echo "✅ Tunnel ativo! Porta 3307 acessível (tentativa $i)"
+    break
+  fi
+  if ! kill -0 $TUNNEL_PID 2>/dev/null; then
+    echo "❌ Processo SSH morreu na tentativa $i"
+    exit 1
+  fi
+  echo "   aguardando... ($i/25)"
+  sleep 1
+done
+
+if ! nc -z 127.0.0.1 3307 2>/dev/null; then
+  echo "❌ Timeout: porta 3307 nunca ficou disponível"
   exit 1
 fi
 
-echo "✅ Tunnel ativo!"
 echo "🚀 Iniciando MCP Server MySQL..."
 exec mcp-server-mysql
