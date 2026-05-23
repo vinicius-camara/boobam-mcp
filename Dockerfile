@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
 # Instala openssh-client para o tunnel SSH
-RUN apk add --no-cache openssh-client bash
+RUN apk add --no-cache openssh-client bash curl
 
 # Instala o MCP server globalmente
 RUN npm install -g @benborla29/mcp-server-mysql
