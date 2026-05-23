@@ -17,8 +17,11 @@ const MYSQL_CFG = {
   connectTimeout:  10000,
 };
 
+const BEARER_TOKEN = process.env.BEARER_TOKEN || '';
+
 console.log('[config] MySQL:', MYSQL_CFG.user + '@' + MYSQL_CFG.host + ':' + MYSQL_CFG.port + '/' + MYSQL_CFG.database);
 console.log('[config] PORT:', PORT);
+console.log('[config] Auth:', BEARER_TOKEN ? 'Bearer token configured ✅' : '⚠️  NO TOKEN SET — server is open!');
 
 let pool = null;
 function getPool() {
@@ -29,26 +32,46 @@ function getPool() {
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(express.json({ strict: false }));
 
-// Log every incoming request
 app.use((req, _res, next) => {
   console.log('[req]', req.method, req.path);
   next();
 });
 
 // ── OAuth discovery: 404 = no auth required ───────────────────────────────────
+// Estes endpoints ficam públicos para o claude.ai checar antes de autenticar
 app.get('/.well-known/oauth-protected-resource',         (_req, res) => res.sendStatus(404));
 app.get('/.well-known/oauth-protected-resource/sse',     (_req, res) => res.sendStatus(404));
 app.get('/.well-known/oauth-authorization-server',       (_req, res) => res.sendStatus(404));
 app.get('/.well-known/oauth-authorization-server/sse',   (_req, res) => res.sendStatus(404));
 app.post('/register',                                    (_req, res) => res.sendStatus(404));
 
-// ── Health ────────────────────────────────────────────────────────────────────
+// ── Bearer token auth middleware ──────────────────────────────────────────────
+// Aceita token via header Authorization: Bearer TOKEN
+// ou via query param ?token=TOKEN (útil para configurar URL no claude.ai)
+function requireAuth(req, res, next) {
+  if (!BEARER_TOKEN) return next(); // sem token configurado: aceita tudo (modo dev)
+
+  // Verifica header
+  const authHeader = req.headers['authorization'] || '';
+  if (authHeader.startsWith('Bearer ') && authHeader.slice(7) === BEARER_TOKEN) {
+    return next();
+  }
+
+  // Verifica query param
+  if (req.query && req.query.token === BEARER_TOKEN) {
+    return next();
+  }
+
+  console.warn('[auth] acesso negado:', req.method, req.path, '| ip:', req.ip);
+  return res.status(401).json({ error: 'Unauthorized' });
+}
+
+// ── Health (público — só verifica se o servidor está de pé) ───────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database }));
 
 // ── MCP Streamable HTTP Transport (POST) + legacy SSE GET ────────────────────
-app.all('/sse', async (req, res) => {
+app.all('/sse', requireAuth, async (req, res) => {
   if (req.method === 'GET') {
-    // Legacy SSE connect — send endpoint event and keep open
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -58,10 +81,8 @@ app.all('/sse', async (req, res) => {
     return;
   }
 
-  // POST — Streamable HTTP Transport (claude.ai default)
+  // POST — Streamable HTTP Transport
   let body = req.body;
-
-  // Handle batch requests (array) or single request
   const requests = Array.isArray(body) ? body : [body];
   const results  = [];
 
@@ -71,15 +92,11 @@ app.all('/sse', async (req, res) => {
       if (r !== null) results.push(r);
     } catch (e) {
       console.error('[mcp] unhandled error:', e.message);
-      if (msg.id != null) {
-        results.push(jsonrpcErr(msg.id, -32603, e.message));
-      }
+      if (msg.id != null) results.push(jsonrpcErr(msg.id, -32603, e.message));
     }
   }
 
-  if (results.length === 0) {
-    return res.sendStatus(202); // notifications only, no body
-  }
+  if (results.length === 0) return res.sendStatus(202);
   res.setHeader('Content-Type', 'application/json');
   res.json(results.length === 1 ? results[0] : results);
 });
@@ -165,7 +182,7 @@ async function handleMCP(msg) {
         } else {
           throw new Error('Tool desconhecida: ' + name);
         }
-        return ok({ content: [{ type: 'text', text: text }] });
+        return ok({ content: [{ type: 'text', text }] });
       } catch (toolErr) {
         console.error('[tool error]', toolErr.message);
         return ok({ content: [{ type: 'text', text: 'Erro: ' + toolErr.message }], isError: true });
@@ -188,9 +205,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('✅ Boobam MCP server listening on 0.0.0.0:' + PORT);
 });
 
-process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err);
-});
+process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
+process.on('uncaughtException',  (err)    => { console.error('[uncaughtException]', err); });
