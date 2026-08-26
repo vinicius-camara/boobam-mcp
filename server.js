@@ -7,21 +7,48 @@ const app  = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 const MYSQL_CFG = {
-  host:            process.env.MYSQL_HOST || '127.0.0.1',
-  port:            parseInt(process.env.MYSQL_PORT || '3307', 10),
-  user:            process.env.MYSQL_USER || 'root',
-  password:        process.env.MYSQL_PASS || '',
-  database:        process.env.MYSQL_DB   || 'boobam',
+  host:               process.env.MYSQL_HOST || '127.0.0.1',
+  port:               parseInt(process.env.MYSQL_PORT || '3307', 10),
+  user:               process.env.MYSQL_USER || 'root',
+  password:           process.env.MYSQL_PASS || '',
+  database:           process.env.MYSQL_DB   || 'boobam',
   waitForConnections: true,
-  connectionLimit: 5,
-  connectTimeout:  10000,
+  connectionLimit:    5,
+  connectTimeout:     10000,
 };
 
 const BEARER_TOKEN = process.env.BEARER_TOKEN || '';
 
 console.log('[config] MySQL:', MYSQL_CFG.user + '@' + MYSQL_CFG.host + ':' + MYSQL_CFG.port + '/' + MYSQL_CFG.database);
 console.log('[config] PORT:', PORT);
-console.log('[config] Auth:', BEARER_TOKEN ? 'Bearer token configured ✅' : '⚠️  NO TOKEN SET — server is open!');
+console.log('[config] Auth:', BEARER_TOKEN ? 'Bearer token configured ✅' : '⚠️ NO TOKEN SET — server is open!');
+
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+const RATE_LIMIT_MAX    = 60;     // máximo de requisições por janela
+const RATE_LIMIT_WINDOW = 60000;  // janela de 1 minuto em ms
+const rateLimitMap = new Map();
+
+function checkRateLimit(token) {
+  const now   = Date.now();
+  const entry = rateLimitMap.get(token);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(token, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    return { allowed: true, remaining: RATE_LIMIT_MAX - 1 };
+  }
+  if (entry.count >= RATE_LIMIT_MAX) {
+    return { allowed: false, remaining: 0, resetAt: entry.resetAt };
+  }
+  entry.count++;
+  return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count };
+}
+
+// Limpeza de entradas expiradas a cada 5 minutos
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitMap.entries()) {
+    if (now > entry.resetAt) rateLimitMap.delete(key);
+  }
+}, 5 * 60 * 1000);
 
 let pool = null;
 function getPool() {
@@ -38,38 +65,49 @@ app.use((req, _res, next) => {
 });
 
 // ── OAuth discovery: 404 = no auth required ───────────────────────────────────
-// Estes endpoints ficam públicos para o claude.ai checar antes de autenticar
-app.get('/.well-known/oauth-protected-resource',         (_req, res) => res.sendStatus(404));
-app.get('/.well-known/oauth-protected-resource/sse',     (_req, res) => res.sendStatus(404));
-app.get('/.well-known/oauth-authorization-server',       (_req, res) => res.sendStatus(404));
-app.get('/.well-known/oauth-authorization-server/sse',   (_req, res) => res.sendStatus(404));
-app.post('/register',                                    (_req, res) => res.sendStatus(404));
+app.get('/.well-known/oauth-protected-resource',       (_req, res) => res.sendStatus(404));
+app.get('/.well-known/oauth-protected-resource/sse',   (_req, res) => res.sendStatus(404));
+app.get('/.well-known/oauth-authorization-server',     (_req, res) => res.sendStatus(404));
+app.get('/.well-known/oauth-authorization-server/sse', (_req, res) => res.sendStatus(404));
+app.post('/register', (_req, res) => res.sendStatus(404));
 
-// ── Bearer token auth middleware ──────────────────────────────────────────────
-// Aceita token via header Authorization: Bearer TOKEN
-// ou via query param ?token=TOKEN (útil para configurar URL no claude.ai)
+// ── Bearer token auth + rate limiting ────────────────────────────────────────
 function requireAuth(req, res, next) {
-  if (!BEARER_TOKEN) return next(); // sem token configurado: aceita tudo (modo dev)
+  if (!BEARER_TOKEN) return next();
 
-  // Verifica header
+  let authenticated = false;
+
   const authHeader = req.headers['authorization'] || '';
   if (authHeader.startsWith('Bearer ') && authHeader.slice(7) === BEARER_TOKEN) {
-    return next();
+    authenticated = true;
+  } else if (req.query && req.query.token === BEARER_TOKEN) {
+    authenticated = true;
   }
 
-  // Verifica query param
-  if (req.query && req.query.token === BEARER_TOKEN) {
-    return next();
+  if (!authenticated) {
+    console.warn('[auth] acesso negado:', req.method, req.path, '| ip:', req.ip);
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  console.warn('[auth] acesso negado:', req.method, req.path, '| ip:', req.ip);
-  return res.status(401).json({ error: 'Unauthorized' });
+  // Rate limiting
+  const rl = checkRateLimit(BEARER_TOKEN);
+  res.setHeader('X-RateLimit-Limit',     RATE_LIMIT_MAX);
+  res.setHeader('X-RateLimit-Remaining', rl.remaining);
+
+  if (!rl.allowed) {
+    const retryAfter = Math.ceil((rl.resetAt - Date.now()) / 1000);
+    console.warn('[rate-limit] bloqueado | ip:', req.ip, '| retry-after:', retryAfter + 's');
+    res.setHeader('Retry-After', retryAfter);
+    return res.status(429).json({ error: 'Too Many Requests', retryAfter });
+  }
+
+  return next();
 }
 
-// ── Health (público — só verifica se o servidor está de pé) ───────────────────
+// ── Health (público) ──────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database }));
 
-// ── MCP Streamable HTTP Transport (POST) + legacy SSE GET ────────────────────
+// ── MCP Streamable HTTP Transport ─────────────────────────────────────────────
 app.all('/sse', requireAuth, async (req, res) => {
   if (req.method === 'GET') {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -81,8 +119,7 @@ app.all('/sse', requireAuth, async (req, res) => {
     return;
   }
 
-  // POST — Streamable HTTP Transport
-  let body = req.body;
+  const body     = req.body;
   const requests = Array.isArray(body) ? body : [body];
   const results  = [];
 
@@ -114,7 +151,7 @@ async function handleMCP(msg) {
       return ok({
         protocolVersion: (params && params.protocolVersion) || '2024-11-05',
         capabilities:    { tools: { listChanged: false } },
-        serverInfo:      { name: 'boobam-mysql', version: '1.0.0' },
+        serverInfo:      { name: 'boobam-mysql', version: '1.1.0' },
       });
 
     case 'initialized':
@@ -137,9 +174,7 @@ async function handleMCP(msg) {
             description: 'Descreve a estrutura (colunas, tipos) de uma tabela.',
             inputSchema: {
               type: 'object',
-              properties: {
-                table: { type: 'string', description: 'Nome da tabela' },
-              },
+              properties: { table: { type: 'string', description: 'Nome da tabela' } },
               required: ['table'],
             },
           },
@@ -148,9 +183,7 @@ async function handleMCP(msg) {
             description: 'Executa uma query SQL SELECT no banco Boobam. Apenas leitura.',
             inputSchema: {
               type: 'object',
-              properties: {
-                sql: { type: 'string', description: 'Query SQL SELECT' },
-              },
+              properties: { sql: { type: 'string', description: 'Query SQL SELECT' } },
               required: ['sql'],
             },
           },
@@ -203,7 +236,8 @@ function jsonrpcErr(id, code, message) {
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log('✅ Boobam MCP server listening on 0.0.0.0:' + PORT);
+  console.log('[rate-limit] ' + RATE_LIMIT_MAX + ' req/min por token');
 });
 
 process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
-process.on('uncaughtException',  (err)    => { console.error('[uncaughtException]', err); });
+process.on('uncaughtException',  (err)    => { console.error('[uncaughtException]',  err);    });
