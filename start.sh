@@ -19,7 +19,7 @@ TUNNEL_PID=""
 start_tunnel() {
   ssh -i /root/.ssh/id_rsa \
       -L "${LOCAL_PORT}:${RDS_HOST}:${RDS_PORT}" \
-      ubuntu@${BASTION} -p ${BASTION_PORT} -N \
+      devops@${BASTION} -p ${BASTION_PORT} -N \
       -o ConnectTimeout=20 \
       -o ServerAliveInterval=30 \
       -o ServerAliveCountMax=3 \
