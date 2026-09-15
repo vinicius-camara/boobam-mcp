@@ -1,8 +1,9 @@
 {
   "name": "boobam-mcp-server",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "dependencies": {
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.0",
     "mysql2": "^3.9.7"
   }
 }
