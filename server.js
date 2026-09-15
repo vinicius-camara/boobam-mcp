@@ -67,8 +67,10 @@ app.use((req, _res, next) => {
 // ── OAuth discovery: 404 = no auth required ───────────────────────────────────
 app.get('/.well-known/oauth-protected-resource',       (_req, res) => res.sendStatus(404));
 app.get('/.well-known/oauth-protected-resource/sse',   (_req, res) => res.sendStatus(404));
+app.get('/.well-known/oauth-protected-resource/mcp',   (_req, res) => res.sendStatus(404));
 app.get('/.well-known/oauth-authorization-server',     (_req, res) => res.sendStatus(404));
 app.get('/.well-known/oauth-authorization-server/sse', (_req, res) => res.sendStatus(404));
+app.get('/.well-known/oauth-authorization-server/mcp', (_req, res) => res.sendStatus(404));
 app.post('/register', (_req, res) => res.sendStatus(404));
 
 // ── Bearer token auth + rate limiting ────────────────────────────────────────
@@ -108,7 +110,13 @@ function requireAuth(req, res, next) {
 app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database }));
 
 // ── MCP Streamable HTTP Transport ─────────────────────────────────────────────
-app.all('/sse', requireAuth, async (req, res) => {
+// /mcp  → endpoint canônico (Streamable HTTP, spec 2025-03-26+; exigido pelo ChatGPT Work)
+// /sse  → alias legado mantido para retrocompatibilidade com conectores existentes
+app.all(['/mcp', '/sse'], requireAuth, async (req, res) => {
+  if (req.method === 'DELETE') {
+    // Servidor stateless: encerramento de sessão é um no-op
+    return res.sendStatus(200);
+  }
   if (req.method === 'GET') {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -151,7 +159,7 @@ async function handleMCP(msg) {
       return ok({
         protocolVersion: (params && params.protocolVersion) || '2024-11-05',
         capabilities:    { tools: { listChanged: false } },
-        serverInfo:      { name: 'boobam-mysql', version: '1.1.0' },
+        serverInfo:      { name: 'boobam-mysql', version: '1.2.0' },
       });
 
     case 'initialized':
@@ -168,6 +176,7 @@ async function handleMCP(msg) {
             name: 'list_tables',
             description: 'Lista todas as tabelas do banco de dados Boobam.',
             inputSchema: { type: 'object', properties: {}, required: [] },
+            annotations: { title: 'Listar tabelas', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
           {
             name: 'describe_table',
@@ -177,6 +186,7 @@ async function handleMCP(msg) {
               properties: { table: { type: 'string', description: 'Nome da tabela' } },
               required: ['table'],
             },
+            annotations: { title: 'Descrever tabela', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
           {
             name: 'query',
@@ -186,6 +196,7 @@ async function handleMCP(msg) {
               properties: { sql: { type: 'string', description: 'Query SQL SELECT' } },
               required: ['sql'],
             },
+            annotations: { title: 'Query SELECT (somente leitura)', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
         ],
       });
