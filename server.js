@@ -19,20 +19,19 @@ const MYSQL_CFG = {
   connectTimeout:     10000,
 };
 
-const BEARER_TOKEN        = process.env.BEARER_TOKEN        || '';
-const AUTH0_DOMAIN        = process.env.AUTH0_DOMAIN        || '';
-const AUTH0_CLIENT_ID     = process.env.AUTH0_CLIENT_ID     || '';
-const AUTH0_CLIENT_SECRET = process.env.AUTH0_CLIENT_SECRET || '';
-const JWT_SECRET          = process.env.JWT_SECRET          || '';
-const BASE_URL            = process.env.BASE_URL            || 'http://localhost:' + PORT;
+const BEARER_TOKEN         = process.env.BEARER_TOKEN         || '';
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const JWT_SECRET           = process.env.JWT_SECRET           || '';
+const BASE_URL             = process.env.BASE_URL             || 'http://localhost:' + PORT;
 const ALLOWED_EMAIL_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || ''; // ex.: boobam.com.br (vazio = qualquer e-mail)
 
-const OAUTH_ENABLED = !!(AUTH0_DOMAIN && AUTH0_CLIENT_ID && AUTH0_CLIENT_SECRET && JWT_SECRET);
+const OAUTH_ENABLED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && JWT_SECRET);
 
 console.log('[config] MySQL:', MYSQL_CFG.user + '@' + MYSQL_CFG.host + ':' + MYSQL_CFG.port + '/' + MYSQL_CFG.database);
 console.log('[config] PORT:', PORT);
 console.log('[config] Auth estático:', BEARER_TOKEN ? 'Bearer token configurado ✅' : '⚠️ sem token estático');
-console.log('[config] OAuth:', OAUTH_ENABLED ? 'Auth0 configurado ✅ (' + AUTH0_DOMAIN + ')' : '⚠️ não configurado — apenas Bearer estático');
+console.log('[config] OAuth:', OAUTH_ENABLED ? 'Google OAuth configurado ✅' : '⚠️ não configurado — apenas Bearer estático');
 
 // ── Rate limiting (por credencial: token estático ou e-mail do JWT) ───────────
 const RATE_LIMIT_MAX    = 60;     // máximo de requisições por janela
@@ -164,19 +163,21 @@ app.get('/authorize', (req, res) => {
 
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id:     AUTH0_CLIENT_ID,
+    client_id:     GOOGLE_CLIENT_ID,
     redirect_uri:  BASE_URL + '/callback',
     scope:         'openid email profile',
     state:         authState,
+    access_type:   'online',
   });
-  res.redirect(`https://${AUTH0_DOMAIN}/authorize?${params}`);
+  if (ALLOWED_EMAIL_DOMAIN) params.set('hd', ALLOWED_EMAIL_DOMAIN); // dica de domínio (a checagem real é feita no callback)
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 });
 
-// ── Auth0 Callback ────────────────────────────────────────────────────────────
+// ── Google Callback ───────────────────────────────────────────────────────────
 app.get('/callback', async (req, res) => {
   if (!OAUTH_ENABLED) return res.sendStatus(404);
   const { code, state: authState, error, error_description } = req.query;
-  if (error) return res.status(400).send('Auth0 error: ' + error + (error_description ? ' — ' + error_description : ''));
+  if (error) return res.status(400).send('Google error: ' + error + (error_description ? ' — ' + error_description : ''));
 
   const oauthReq = oauthStates.get(authState);
   if (!oauthReq || Date.now() > oauthReq.expires) {
@@ -185,13 +186,13 @@ app.get('/callback', async (req, res) => {
   oauthStates.delete(authState);
 
   try {
-    const tokenRes = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
         grant_type:    'authorization_code',
-        client_id:     AUTH0_CLIENT_ID,
-        client_secret: AUTH0_CLIENT_SECRET,
+        client_id:     GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
         code,
         redirect_uri:  BASE_URL + '/callback',
       }),
@@ -199,7 +200,7 @@ app.get('/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     if (tokens.error) throw new Error(tokens.error_description || tokens.error);
 
-    const userRes = await fetch(`https://${AUTH0_DOMAIN}/userinfo`, {
+    const userRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
       headers: { 'Authorization': 'Bearer ' + tokens.access_token },
     });
     const user = await userRes.json();
