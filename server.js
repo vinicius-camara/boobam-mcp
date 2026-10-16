@@ -19,6 +19,20 @@ const MYSQL_CFG = {
   connectTimeout:     10000,
 };
 
+// ── Fonte D0: Aurora de produção, endpoint reader (somente leitura) ──────────
+// Configurada via D0_MYSQL_*; se D0_MYSQL_HOST não estiver definido, a fonte
+// fica indisponível e as tools continuam operando apenas com a D-1.
+const D0_CFG = process.env.D0_MYSQL_HOST ? {
+  host:               process.env.D0_MYSQL_HOST,
+  port:               parseInt(process.env.D0_MYSQL_PORT || '3306', 10),
+  user:               process.env.D0_MYSQL_USER || MYSQL_CFG.user,
+  password:           process.env.D0_MYSQL_PASS || '',
+  database:           process.env.D0_MYSQL_DB   || MYSQL_CFG.database,
+  waitForConnections: true,
+  connectionLimit:    3,
+  connectTimeout:     10000,
+} : null;
+
 const BEARER_TOKEN         = process.env.BEARER_TOKEN         || '';
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -28,7 +42,8 @@ const ALLOWED_EMAIL_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || ''; // ex.: boo
 
 const OAUTH_ENABLED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && JWT_SECRET);
 
-console.log('[config] MySQL:', MYSQL_CFG.user + '@' + MYSQL_CFG.host + ':' + MYSQL_CFG.port + '/' + MYSQL_CFG.database);
+console.log('[config] MySQL D-1:', MYSQL_CFG.user + '@' + MYSQL_CFG.host + ':' + MYSQL_CFG.port + '/' + MYSQL_CFG.database);
+console.log('[config] MySQL D0:', D0_CFG ? D0_CFG.user + '@' + D0_CFG.host + ':' + D0_CFG.port + '/' + D0_CFG.database + ' ✅' : '⚠️ não configurada');
 console.log('[config] PORT:', PORT);
 console.log('[config] Auth estático:', BEARER_TOKEN ? 'Bearer token configurado ✅' : '⚠️ sem token estático');
 console.log('[config] OAuth:', OAUTH_ENABLED ? 'Google OAuth configurado ✅' : '⚠️ não configurado — apenas Bearer estático');
@@ -71,10 +86,14 @@ setInterval(() => {
   for (const [k, v] of oauthCodes.entries())  if (now > v.expires) oauthCodes.delete(k);
 }, 60 * 1000);
 
-let pool = null;
-function getPool() {
-  if (!pool) pool = mysql2.createPool(MYSQL_CFG);
-  return pool;
+const pools = {};
+function getPool(source) {
+  const key = source === 'd0' ? 'd0' : 'd1';
+  if (key === 'd0' && !D0_CFG) {
+    throw new Error('Fonte d0 (produção) não configurada neste servidor');
+  }
+  if (!pools[key]) pools[key] = mysql2.createPool(key === 'd0' ? D0_CFG : MYSQL_CFG);
+  return pools[key];
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -313,7 +332,7 @@ function requireAuth(req, res, next) {
 }
 
 // ── Health (público) ──────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database, oauth: OAUTH_ENABLED }));
+app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database, d0: !!D0_CFG, oauth: OAUTH_ENABLED }));
 
 // ── MCP Streamable HTTP Transport ─────────────────────────────────────────────
 // /mcp  → endpoint canônico (Streamable HTTP, spec 2025-03-26+; exigido pelo ChatGPT Work)
@@ -365,7 +384,7 @@ async function handleMCP(msg, user) {
       return ok({
         protocolVersion: (params && params.protocolVersion) || '2024-11-05',
         capabilities:    { tools: { listChanged: false } },
-        serverInfo:      { name: 'boobam-mysql', version: '2.0.0' },
+        serverInfo:      { name: 'boobam-mysql', version: '2.1.0' },
       });
 
     case 'initialized':
@@ -375,43 +394,55 @@ async function handleMCP(msg, user) {
     case 'ping':
       return ok({});
 
-    case 'tools/list':
+    case 'tools/list': {
+      const sourceProp = {
+        type: 'string',
+        enum: ['d1', 'd0'],
+        description: 'Fonte de dados: "d1" = réplica D-1 de QA (padrão, dados de ontem); "d0" = Aurora de produção em tempo real, endpoint reader somente leitura. Use "d0" apenas quando precisar de dados do dia.',
+      };
       return ok({
         tools: [
           {
             name: 'list_tables',
-            description: 'Lista todas as tabelas do banco de dados Boobam.',
-            inputSchema: { type: 'object', properties: {}, required: [] },
+            description: 'Lista todas as tabelas do banco de dados Boobam. Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura).',
+            inputSchema: { type: 'object', properties: { source: sourceProp }, required: [] },
             annotations: { title: 'Listar tabelas', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
           {
             name: 'describe_table',
-            description: 'Descreve a estrutura (colunas, tipos) de uma tabela.',
+            description: 'Descreve a estrutura (colunas, tipos) de uma tabela. Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura).',
             inputSchema: {
               type: 'object',
-              properties: { table: { type: 'string', description: 'Nome da tabela' } },
+              properties: { table: { type: 'string', description: 'Nome da tabela' }, source: sourceProp },
               required: ['table'],
             },
             annotations: { title: 'Descrever tabela', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
           {
             name: 'query',
-            description: 'Executa uma query SQL SELECT no banco Boobam. Apenas leitura.',
+            description: 'Executa uma query SQL SELECT no banco Boobam. Apenas leitura. Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura — use para dados do dia).',
             inputSchema: {
               type: 'object',
-              properties: { sql: { type: 'string', description: 'Query SQL SELECT' } },
+              properties: { sql: { type: 'string', description: 'Query SQL SELECT' }, source: sourceProp },
               required: ['sql'],
             },
             annotations: { title: 'Query SELECT (somente leitura)', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
         ],
       });
+    }
 
     case 'tools/call': {
-      const name = params && params.name;
-      const args = (params && params.arguments) || {};
-      const db   = getPool();
-      console.log('[tool] calling:', name, args, user ? '| user: ' + user.sub : '');
+      const name   = params && params.name;
+      const args   = (params && params.arguments) || {};
+      const source = args.source === 'd0' ? 'd0' : 'd1';
+      console.log('[tool] calling:', name, '| source:', source, args, user ? '| user: ' + user.sub : '');
+      let db;
+      try {
+        db = getPool(source);
+      } catch (cfgErr) {
+        return ok({ content: [{ type: 'text', text: 'Erro: ' + cfgErr.message }], isError: true });
+      }
       try {
         let text = '';
         if (name === 'list_tables') {
@@ -452,7 +483,7 @@ function jsonrpcErr(id, code, message) {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('✅ Boobam MCP server v2.0.0 listening on 0.0.0.0:' + PORT);
+  console.log('✅ Boobam MCP server v2.1.0 listening on 0.0.0.0:' + PORT);
   console.log('[rate-limit] ' + RATE_LIMIT_MAX + ' req/min por credencial');
 });
 
