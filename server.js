@@ -43,6 +43,9 @@ const ALLOWED_EMAIL_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || ''; // ex.: boo
 const OAUTH_ENABLED = !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && JWT_SECRET);
 
 console.log('[config] MySQL D-1:', MYSQL_CFG.user + '@' + MYSQL_CFG.host + ':' + MYSQL_CFG.port + '/' + MYSQL_CFG.database);
+// D1_ENABLED=false desliga a réplica D-1: tudo vai para a D0 e o parâmetro source some das tools.
+const D1_ENABLED = process.env.D1_ENABLED !== 'false';
+console.log('[config] MySQL D1:', D1_ENABLED ? 'ligada' : '⛔ desligada (D1_ENABLED=false)');
 console.log('[config] MySQL D0:', D0_CFG ? D0_CFG.user + '@' + D0_CFG.host + ':' + D0_CFG.port + '/' + D0_CFG.database + ' ✅' : '⚠️ não configurada');
 console.log('[config] PORT:', PORT);
 console.log('[config] Auth estático:', BEARER_TOKEN ? 'Bearer token configurado ✅' : '⚠️ sem token estático');
@@ -332,7 +335,7 @@ function requireAuth(req, res, next) {
 }
 
 // ── Health (público) ──────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database, d0: !!D0_CFG, oauth: OAUTH_ENABLED }));
+app.get('/health', (_req, res) => res.json({ ok: true, db: MYSQL_CFG.database, d1: D1_ENABLED, d0: !!D0_CFG, oauth: OAUTH_ENABLED }));
 
 // ── MCP Streamable HTTP Transport ─────────────────────────────────────────────
 // /mcp  → endpoint canônico (Streamable HTTP, spec 2025-03-26+; exigido pelo ChatGPT Work)
@@ -400,30 +403,34 @@ async function handleMCP(msg, user) {
         enum: ['d1', 'd0'],
         description: 'Fonte de dados: "d1" = réplica D-1 de QA (padrão, dados de ontem); "d0" = Aurora de produção em tempo real, endpoint reader somente leitura. Use "d0" apenas quando precisar de dados do dia.',
       };
+      const SOURCE_NOTE = D1_ENABLED
+        ? ' Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura).'
+        : ' Fonte: produção em tempo real (D0, endpoint reader, somente leitura).';
+      const sourceProps = D1_ENABLED ? { source: sourceProp } : {};
       return ok({
         tools: [
           {
             name: 'list_tables',
-            description: 'Lista todas as tabelas do banco de dados Boobam. Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura).',
-            inputSchema: { type: 'object', properties: { source: sourceProp }, required: [] },
+            description: 'Lista todas as tabelas do banco de dados Boobam.' + SOURCE_NOTE,
+            inputSchema: { type: 'object', properties: { ...sourceProps }, required: [] },
             annotations: { title: 'Listar tabelas', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
           {
             name: 'describe_table',
-            description: 'Descreve a estrutura (colunas, tipos) de uma tabela. Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura).',
+            description: 'Descreve a estrutura (colunas, tipos) de uma tabela.' + SOURCE_NOTE,
             inputSchema: {
               type: 'object',
-              properties: { table: { type: 'string', description: 'Nome da tabela' }, source: sourceProp },
+              properties: { table: { type: 'string', description: 'Nome da tabela' }, ...sourceProps },
               required: ['table'],
             },
             annotations: { title: 'Descrever tabela', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
           },
           {
             name: 'query',
-            description: 'Executa uma query SQL SELECT no banco Boobam. Apenas leitura. Aceita source "d1" (réplica D-1, padrão) ou "d0" (produção em tempo real, somente leitura — use para dados do dia).',
+            description: 'Executa uma query SQL SELECT no banco Boobam. Apenas leitura.' + SOURCE_NOTE,
             inputSchema: {
               type: 'object',
-              properties: { sql: { type: 'string', description: 'Query SQL SELECT' }, source: sourceProp },
+              properties: { sql: { type: 'string', description: 'Query SQL SELECT' }, ...sourceProps },
               required: ['sql'],
             },
             annotations: { title: 'Query SELECT (somente leitura)', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -435,7 +442,7 @@ async function handleMCP(msg, user) {
     case 'tools/call': {
       const name   = params && params.name;
       const args   = (params && params.arguments) || {};
-      const source = args.source === 'd0' ? 'd0' : 'd1';
+      const source = !D1_ENABLED || args.source === 'd0' ? 'd0' : 'd1';
       console.log('[tool] calling:', name, '| source:', source, args, user ? '| user: ' + user.sub : '');
       let db;
       try {

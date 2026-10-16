@@ -31,6 +31,13 @@ D0_LOCAL_PORT="3308"
 D0_RDS_PORT="3306"
 D0_TUNNEL_PID=""
 
+# D1_ENABLED=false (Railway) desliga o túnel da réplica D-1.
+D1_ON="1"
+if [ "${D1_ENABLED:-true}" = "false" ]; then
+  D1_ON=""
+  echo "⛔ D1_ENABLED=false — túnel d1 desativado"
+fi
+
 # D0 só é ativado se D0_MYSQL_USER e D0_MYSQL_PASS estiverem definidos no Railway.
 D0_ENABLED=""
 if [ -n "${D0_MYSQL_USER:-}" ] && [ -n "${D0_MYSQL_PASS:-}" ]; then
@@ -115,13 +122,15 @@ wait_for_tunnel() {
 }
 
 # ── Primeira conexão (D-1, obrigatória) ──────────────────────────────────────
-start_tunnel
-until wait_for_tunnel d1_reachable "${TUNNEL_PID}" "d1"; do
-  echo "[tunnel d1] Falha na conexão inicial, tentando novamente em 5s..."
-  stop_pid "${TUNNEL_PID}"
-  sleep 5
+if [ -n "${D1_ON}" ]; then
   start_tunnel
-done
+  until wait_for_tunnel d1_reachable "${TUNNEL_PID}" "d1"; do
+    echo "[tunnel d1] Falha na conexão inicial, tentando novamente em 5s..."
+    stop_pid "${TUNNEL_PID}"
+    sleep 5
+    start_tunnel
+  done
+fi
 
 # ── Primeira conexão (D0, melhor esforço) ────────────────────────────────────
 if [ -n "${D0_ENABLED}" ]; then
@@ -137,7 +146,7 @@ fi
 (
   while true; do
     sleep 30
-    if ! kill -0 "${TUNNEL_PID}" 2>/dev/null || ! d1_reachable; then
+    if [ -n "${D1_ON}" ] && { ! kill -0 "${TUNNEL_PID}" 2>/dev/null || ! d1_reachable; }; then
       echo "[watchdog] Túnel d1 caiu (PID=${TUNNEL_PID}). Reconectando..."
       stop_pid "${TUNNEL_PID}"
       sleep 3
